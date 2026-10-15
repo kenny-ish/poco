@@ -104,7 +104,9 @@ void AsyncChannel::open()
 {
 	FastMutex::ScopedLock lock(_threadMutex);
 
-	if (!_thread.isRunning()) _thread.start(*this);
+	// A message that passed the check in log() before close() ran must
+	// not start the thread again after close() has joined it.
+	if (!_closed && !_thread.isRunning()) _thread.start(*this);
 }
 
 
@@ -112,6 +114,8 @@ void AsyncChannel::close()
 {
 	if (!_closed.exchange(true))
 	{
+		FastMutex::ScopedLock lock(_threadMutex);
+
 		if (_thread.isRunning())
 		{
 			while (!_queue.empty()) Thread::sleep(100);
@@ -130,16 +134,17 @@ template <typename M>
 void AsyncChannel::logImpl(M&& msg)
 {
 	if (_closed) return;
-	if (_queueSize != 0 && static_cast<std::size_t>(_queue.size()) >= _queueSize)
+	const std::size_t queueSize = _queueSize;
+	if (queueSize != 0 && static_cast<std::size_t>(_queue.size()) >= queueSize)
 	{
 		++_dropCount;
 		return;
 	}
 
-	if (_dropCount != 0)
+	const std::size_t dropCount = _dropCount.exchange(0);
+	if (dropCount != 0)
 	{
-		_queue.enqueueNotification(new MessageNotification(Message(msg, Poco::format("Dropped %z messages.", _dropCount))));
-		_dropCount = 0;
+		_queue.enqueueNotification(new MessageNotification(Message(msg, Poco::format("Dropped %z messages.", dropCount))));
 	}
 
 	open();
